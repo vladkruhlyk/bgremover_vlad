@@ -5,30 +5,27 @@ from PIL import Image
 import io
 from flask import Flask
 from threading import Thread
+import gc
 
-# --- КОНФИГУРАЦИЯ ---
-# Токен берем из переменных окружения Render (настроим это позже на сайте)
+# 1. КОНФИГУРАЦИЯ
 TOKEN = os.environ.get('BOT_TOKEN')
-
-# Если токена нет, бот упадет с понятной ошибкой
 if not TOKEN:
-    raise ValueError("Не найден BOT_TOKEN. Убедись, что добавил его в Environment Variables на Render.")
+    raise ValueError("Не найден BOT_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 
-# Инициализируем легкую модель (u2netp), чтобы не вылететь по памяти на бесплатном тарифе
-model_name = "u2netp"
-session = new_session(model_name)
+# Глобальная переменная для сессии, но пока пустая!
+# Мы не загружаем модель сразу, чтобы сэкономить память при запуске.
+session = None 
 
-# --- WEB SERVER (ЧТОБЫ RENDER НЕ УБИЛ ПРОЦЕСС) ---
+# --- WEB SERVER ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Bot is alive and waiting for photos!"
 
 def run_web():
-    # Render передает порт через переменную PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -36,42 +33,54 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-# --- ЛОГИКА БОТА ---
+# --- ЛОГИКА ---
+def get_session():
+    """Загружает нейросеть только при первом обращении"""
+    global session
+    if session is None:
+        print("Загружаю модель u2netp...") # Лог для отладки
+        session = new_session("u2netp")
+    return session
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Отправь мне картинку, и я сделаю фон прозрачным.")
+    bot.reply_to(message, "Привет! Я готов. Отправь фото (первая обработка может занять время).")
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
     try:
         status_msg = bot.reply_to(message, "Обрабатываю... ⏳")
         
-        # 1. Получаем файл
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
-        # 2. Открываем картинку
         input_image = Image.open(io.BytesIO(downloaded_file))
 
-        # 3. Удаляем фон (используем заранее загруженную сессию u2netp)
-        output_image = remove(input_image, session=session)
+        # ВОТ ЗДЕСЬ мы вызываем функцию загрузки.
+        # Если это первое фото после перезагрузки - тут будет задержка 5-10 сек.
+        current_session = get_session()
+        
+        output_image = remove(input_image, session=current_session)
 
-        # 4. Сохраняем в буфер
         bio = io.BytesIO()
-        bio.name = 'no_bg.png'
+        bio.name = 'sticker.png'
         output_image.save(bio, 'PNG')
         bio.seek(0)
 
-        # 5. Отправляем документ
         bot.send_document(message.chat.id, bio)
-        
-        # Чистим чат от сервисного сообщения
         bot.delete_message(message.chat.id, status_msg.message_id)
+        
+        # Принудительная очистка мусора в памяти
+        gc.collect()
 
     except Exception as e:
-        bot.reply_to(message, f"Ошибка при обработке: {e}")
+        # Если память кончилась в момент обработки
+        bot.reply_to(message, f"Ошибка (возможно не хватило памяти): {e}")
+        # Сбрасываем сессию, чтобы попробовать снова
+        global session
+        session = None
+        gc.collect()
 
-# --- ЗАПУСК ---
 if __name__ == '__main__':
-    keep_alive() # Запускаем веб-сервер в фоне
+    keep_alive()
     bot.polling(non_stop=True)
