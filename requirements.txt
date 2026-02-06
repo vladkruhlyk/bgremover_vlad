@@ -1,3 +1,6 @@
-aiogram==2.23.1
-requests
-Flask
+pyTelegramBotAPI
+rembg
+pillow
+flask
+gunicorn
+onnxruntime
